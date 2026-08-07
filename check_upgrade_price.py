@@ -13,6 +13,7 @@ than fail silently - so a site layout change surfaces as a clear
 import os
 import sys
 import time
+import csv
 import traceback
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -191,12 +192,12 @@ def check_price(headless: bool = True) -> tuple[str, str]:
 
 def get_last_logged_prices() -> tuple[str | None, str | None]:
     try:
-        with open(LOG_FILE) as f:
-            lines = [l.strip() for l in f if l.strip()]
-        if lines:
-            parts = lines[-1].split(",")
-            if len(parts) >= 3:
-                return parts[1], parts[2]
+        with open(LOG_FILE, newline="") as f:
+            rows = [row for row in csv.reader(f) if row]
+        if rows:
+            last_row = rows[-1]
+            if len(last_row) >= 3:
+                return last_row[1], last_row[2]
     except FileNotFoundError:
         pass
     return None, None
@@ -210,8 +211,8 @@ if __name__ == "__main__":
 
         last_outbound, last_return = get_last_logged_prices()
 
-        with open(LOG_FILE, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{outbound_price},{return_price}\n")
+        with open(LOG_FILE, "a", newline="") as f:
+            csv.writer(f).writerow([time.strftime("%Y-%m-%d %H:%M:%S"), outbound_price, return_price])
 
         # Always send the routine ntfy heartbeat, every run, regardless of
         # whether anything changed.
