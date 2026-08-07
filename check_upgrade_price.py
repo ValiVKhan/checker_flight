@@ -164,17 +164,23 @@ def check_price(headless: bool = True) -> tuple[str, str]:
         outbound_price = None
         return_price = None
 
-        try:
-            page.wait_for_selector(SELECTOR_PRICE_OUTBOUND, timeout=20000, state="visible")
-            outbound_price = page.inner_text(SELECTOR_PRICE_OUTBOUND).strip()
-        except PlaywrightTimeoutError:
-            pass
+        def wait_for_price(selector: str, label: str, timeout: int = 20000) -> str | None:
+            """Try to find a price, with one retry after a short pause -
+            handles the results page occasionally rendering slowly."""
+            for attempt in (1, 2):
+                try:
+                    page.wait_for_selector(selector, timeout=timeout, state="visible")
+                    return page.inner_text(selector).strip()
+                except PlaywrightTimeoutError:
+                    if attempt == 1:
+                        print(f"{label} price not found on first try, retrying once...")
+                        page.wait_for_timeout(3000)
+                    else:
+                        print(f"{label} price still not found after retry.")
+            return None
 
-        try:
-            page.wait_for_selector(SELECTOR_PRICE_RETURN, timeout=10000, state="visible")
-            return_price = page.inner_text(SELECTOR_PRICE_RETURN).strip()
-        except PlaywrightTimeoutError:
-            pass
+        outbound_price = wait_for_price(SELECTOR_PRICE_OUTBOUND, "Outbound")
+        return_price = wait_for_price(SELECTOR_PRICE_RETURN, "Return")
 
         if not outbound_price and not return_price:
             page.screenshot(path="debug_screenshot.png", full_page=True)
@@ -184,6 +190,17 @@ def check_price(headless: bool = True) -> tuple[str, str]:
                 "Reached the results page but couldn't find a price anywhere. "
                 "The site's layout/offer format may have changed - check "
                 "debug_screenshot.png/debug_page.html."
+            )
+
+        if not outbound_price or not return_price:
+            page.screenshot(path="debug_screenshot.png", full_page=True)
+            with open("debug_page.html", "w") as f:
+                f.write(page.content())
+            missing = "outbound" if not outbound_price else "return"
+            raise CheckFailed(
+                f"Found one price but not the other (missing: {missing}). "
+                f"This could be a slow page load or a partial layout change - "
+                f"check debug_screenshot.png/debug_page.html."
             )
 
         browser.close()
