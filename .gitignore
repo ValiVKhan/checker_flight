@@ -1,0 +1,4 @@
+venv/
+debug_screenshot.png
+debug_page.html
+__pycache__/

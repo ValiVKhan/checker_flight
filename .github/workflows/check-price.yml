@@ -1,0 +1,40 @@
+name: Check Qatar Upgrade Price
+
+on:
+  schedule:
+    # Runs every 20 minutes. GitHub may delay this by a few minutes
+    # during high load - it's a "best effort" schedule, not exact.
+    - cron: '*/20 * * * *'
+  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab
+
+jobs:
+  check-price:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install --with-deps chromium
+
+      - name: Run price check
+        env:
+          BOOKING_REFERENCE: ${{ secrets.BOOKING_REFERENCE }}
+          LAST_NAME: ${{ secrets.LAST_NAME }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python check_upgrade_price.py
+
+      - name: Commit updated price log
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add price_log.csv
+          git diff --staged --quiet || git commit -m "Update price log [skip ci]"
+          git push
