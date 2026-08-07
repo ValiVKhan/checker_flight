@@ -22,6 +22,8 @@ URL = "https://www.qatarairways.com/app/upgrade/en/retrieve?appCode=QRCode&platf
 BOOKING_REFERENCE = os.environ["BOOKING_REFERENCE"]
 LAST_NAME = os.environ["LAST_NAME"]
 NTFY_TOPIC = os.environ["NTFY_TOPIC"]
+PUSHOVER_USER_KEY = os.environ.get("PUSHOVER_USER_KEY")
+PUSHOVER_API_TOKEN = os.environ.get("PUSHOVER_API_TOKEN")
 
 SELECTOR_BOOKING_INPUT = "#mat-input-0"
 SELECTOR_LASTNAME_INPUT = "#mat-input-1"
@@ -44,6 +46,34 @@ def notify(message: str, title: str = "Qatar Upgrade Price"):
         )
     except Exception as e:
         print(f"Notification failed (non-fatal): {e}")
+
+
+def notify_urgent(message: str, title: str = "Qatar Upgrade Price - ACTION NEEDED"):
+    """Loud, repeating Pushover alert that bypasses silent mode and keeps
+    re-notifying every 60s for up to 1 hour until you acknowledge it.
+    Falls back to a normal ntfy notification if Pushover isn't configured."""
+    if not PUSHOVER_USER_KEY or not PUSHOVER_API_TOKEN:
+        print("Pushover not configured - falling back to normal notification.")
+        notify(message, title=title)
+        return
+    try:
+        requests.post(
+            "https://api.pushover.net/1/messages.json",
+            data={
+                "token": PUSHOVER_API_TOKEN,
+                "user": PUSHOVER_USER_KEY,
+                "title": title,
+                "message": message,
+                "priority": 2,       # Emergency - bypasses quiet hours/silent mode
+                "retry": 60,         # re-send every 60 seconds
+                "expire": 3600,      # ...for up to 1 hour, until acknowledged
+                "sound": "siren",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"Pushover notification failed (non-fatal): {e}")
+        notify(message, title=title)  # fall back to ntfy so it's never silent
 
 
 class CheckFailed(Exception):
@@ -159,29 +189,53 @@ def check_price(headless: bool = True) -> tuple[str, str]:
         return outbound_price or "not found", return_price or "not found"
 
 
+def get_last_logged_prices() -> tuple[str | None, str | None]:
+    try:
+        with open(LOG_FILE) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        if lines:
+            parts = lines[-1].split(",")
+            if len(parts) >= 3:
+                return parts[1], parts[2]
+    except FileNotFoundError:
+        pass
+    return None, None
+
+
 if __name__ == "__main__":
     try:
         outbound_price, return_price = check_price(headless=True)
         print(f"Outbound price: {outbound_price}")
         print(f"Return price: {return_price}")
+
+        last_outbound, last_return = get_last_logged_prices()
+
         with open(LOG_FILE, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{outbound_price},{return_price}\n")
-        notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
+
+        if (last_outbound is not None and outbound_price != last_outbound) or \
+           (last_return is not None and return_price != last_return):
+            notify_urgent(
+                f"Outbound: {outbound_price} (was {last_outbound})\n"
+                f"Return: {return_price} (was {last_return})",
+                title="Qatar Upgrade Price - CHANGED",
+            )
+        else:
+            notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
 
     except CheckFailed as e:
-        # A known, specific failure - notify with the exact reason.
+        # A known, specific failure - urgent, repeating alert with the exact reason.
         print(f"CHECK FAILED: {e}")
-        notify(f"Check failed: {e}", title="Qatar Upgrade Price - ACTION NEEDED")
+        notify_urgent(f"Check failed: {e}")
         sys.exit(1)
 
     except Exception as e:
         # Anything unexpected (crash, network blip, Playwright internals,
-        # etc.) - still notify rather than fail silently, with a trimmed
-        # traceback for debugging.
+        # etc.) - still notify urgently rather than fail silently.
         print("UNEXPECTED ERROR:")
         traceback.print_exc()
         short_trace = traceback.format_exc().strip().splitlines()[-1]
-        notify(
+        notify_urgent(
             f"Unexpected error: {short_trace}",
             title="Qatar Upgrade Price - SCRIPT ERROR",
         )

@@ -8,6 +8,8 @@ on:
 jobs:
   check-price:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -27,6 +29,8 @@ jobs:
           BOOKING_REFERENCE: ${{ secrets.BOOKING_REFERENCE }}
           LAST_NAME: ${{ secrets.LAST_NAME }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
         run: python check_upgrade_price.py
 
       - name: Commit updated price log
