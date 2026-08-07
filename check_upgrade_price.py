@@ -4,11 +4,16 @@ Qatar Airways upgrade price checker (GitHub Actions version)
 Runs headless using real Chrome (not bundled Chromium) with
 anti-fingerprint flags. Reads booking details and ntfy topic from
 environment variables (set as GitHub Actions secrets).
+
+Designed to always notify on failure, with a specific reason, rather
+than fail silently - so a site layout change surfaces as a clear
+"something changed" alert instead of a stack trace no one sees.
 """
 
 import os
 import sys
 import time
+import traceback
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -41,7 +46,13 @@ def notify(message: str, title: str = "Qatar Upgrade Price"):
         print(f"Notification failed (non-fatal): {e}")
 
 
-def check_price(headless: bool = True) -> tuple[str | None, str | None]:
+class CheckFailed(Exception):
+    """Raised with a human-readable reason so the caller always has a
+    specific message to notify about, instead of a raw stack trace."""
+    pass
+
+
+def check_price(headless: bool = True) -> tuple[str, str]:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             channel="chrome",
@@ -58,18 +69,32 @@ def check_price(headless: bool = True) -> tuple[str | None, str | None]:
         )
         page = context.new_page()
 
-        page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-        print(f"Page title: {page.title()}")
+        try:
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            raise CheckFailed(f"Could not load the page at all (network/site down?): {e}")
+
+        title = page.title()
+        print(f"Page title: {title}")
+
+        # Detect an outright block page (Akamai, Cloudflare, etc.) - this
+        # is a different situation from the form/selectors changing.
+        if "access denied" in title.lower() or "denied" in title.lower():
+            raise CheckFailed(
+                f"Page returned '{title}' - looks like the site blocked this "
+                f"request (rate-limit or bot-detection), not a layout change."
+            )
 
         try:
             page.wait_for_selector(SELECTOR_BOOKING_INPUT, timeout=30000, state="visible")
         except PlaywrightTimeoutError:
-            print("Could not find booking input. Saving screenshot + HTML for debugging.")
             page.screenshot(path="debug_screenshot.png", full_page=True)
             with open("debug_page.html", "w") as f:
                 f.write(page.content())
-            browser.close()
-            return None, None
+            raise CheckFailed(
+                "Could not find the booking reference field. The site's form "
+                "may have changed - check debug_screenshot.png/debug_page.html."
+            )
 
         try:
             page.wait_for_selector(SELECTOR_COOKIE_ACCEPT, timeout=8000, state="visible")
@@ -83,44 +108,81 @@ def check_price(headless: bool = True) -> tuple[str | None, str | None]:
         page.fill(SELECTOR_LASTNAME_INPUT, LAST_NAME, force=True)
         print("Filled in booking reference and last name.")
 
-        page.click(SELECTOR_SUBMIT_BUTTON)
+        try:
+            page.click(SELECTOR_SUBMIT_BUTTON)
+        except Exception:
+            raise CheckFailed(
+                "Could not find/click the submit button. The site's form "
+                "may have changed - check debug_screenshot.png."
+            )
+
+        # Give the results a moment to render before we start checking for
+        # either a price or an error message.
+        page.wait_for_timeout(2000)
+
+        # If the site shows an on-page error (e.g. "no upgrade offers
+        # available", or booking not found), surface that message directly
+        # rather than treating it as a scraping failure.
+        try:
+            err_text = page.inner_text(SELECTOR_ERROR_MESSAGE, timeout=3000)
+            if err_text.strip():
+                raise CheckFailed(f"Site reported: {err_text.strip()}")
+        except PlaywrightTimeoutError:
+            pass  # no error message shown, that's the expected good case
 
         outbound_price = None
         return_price = None
 
         try:
-            page.wait_for_selector(SELECTOR_PRICE_OUTBOUND, timeout=30000, state="visible")
-            outbound_price = page.inner_text(SELECTOR_PRICE_OUTBOUND)
+            page.wait_for_selector(SELECTOR_PRICE_OUTBOUND, timeout=20000, state="visible")
+            outbound_price = page.inner_text(SELECTOR_PRICE_OUTBOUND).strip()
         except PlaywrightTimeoutError:
-            print("Could not find outbound price.")
+            pass
 
         try:
             page.wait_for_selector(SELECTOR_PRICE_RETURN, timeout=10000, state="visible")
-            return_price = page.inner_text(SELECTOR_PRICE_RETURN)
+            return_price = page.inner_text(SELECTOR_PRICE_RETURN).strip()
         except PlaywrightTimeoutError:
-            print("Could not find return price.")
+            pass
 
-        if outbound_price is None and return_price is None:
-            try:
-                err = page.inner_text(SELECTOR_ERROR_MESSAGE)
-                print(f"No prices found, page showed an error instead: {err}")
-            except PlaywrightTimeoutError:
-                print("Timed out waiting for prices or an error message.")
-                page.screenshot(path="debug_screenshot.png")
-                print("Saved debug_screenshot.png for inspection.")
+        if not outbound_price and not return_price:
+            page.screenshot(path="debug_screenshot.png", full_page=True)
+            with open("debug_page.html", "w") as f:
+                f.write(page.content())
+            raise CheckFailed(
+                "Reached the results page but couldn't find a price anywhere. "
+                "The site's layout/offer format may have changed - check "
+                "debug_screenshot.png/debug_page.html."
+            )
 
         browser.close()
-        return outbound_price, return_price
+        return outbound_price or "not found", return_price or "not found"
 
 
 if __name__ == "__main__":
-    outbound_price, return_price = check_price(headless=True)
-    if outbound_price or return_price:
+    try:
+        outbound_price, return_price = check_price(headless=True)
         print(f"Outbound price: {outbound_price}")
         print(f"Return price: {return_price}")
         with open(LOG_FILE, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{outbound_price},{return_price}\n")
         notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
-    else:
-        notify("Price check failed - see debug screenshot/log on the machine.")
+
+    except CheckFailed as e:
+        # A known, specific failure - notify with the exact reason.
+        print(f"CHECK FAILED: {e}")
+        notify(f"Check failed: {e}", title="Qatar Upgrade Price - ACTION NEEDED")
+        sys.exit(1)
+
+    except Exception as e:
+        # Anything unexpected (crash, network blip, Playwright internals,
+        # etc.) - still notify rather than fail silently, with a trimmed
+        # traceback for debugging.
+        print("UNEXPECTED ERROR:")
+        traceback.print_exc()
+        short_trace = traceback.format_exc().strip().splitlines()[-1]
+        notify(
+            f"Unexpected error: {short_trace}",
+            title="Qatar Upgrade Price - SCRIPT ERROR",
+        )
         sys.exit(1)
