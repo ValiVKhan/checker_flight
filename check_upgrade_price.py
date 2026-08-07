@@ -1,15 +1,9 @@
 """
-Qatar Airways upgrade price checker
-------------------------------------
-Uses Playwright to load the upgrade lookup page, fill in a booking
-reference + last name, submit, and scrape the resulting price.
-Designed to run in GitHub Actions on a schedule; sends a push
-notification via ntfy.sh only when the price changes.
-
-REQUIRED ENVIRONMENT VARIABLES (set as GitHub Actions secrets):
-    BOOKING_REFERENCE
-    LAST_NAME
-    NTFY_TOPIC
+Qatar Airways upgrade price checker (GitHub Actions version)
+---------------------------------------------------------------
+Runs headless using real Chrome (not bundled Chromium) with
+anti-fingerprint flags. Reads booking details and ntfy topic from
+environment variables (set as GitHub Actions secrets).
 """
 
 import os
@@ -28,7 +22,8 @@ SELECTOR_BOOKING_INPUT = "#mat-input-0"
 SELECTOR_LASTNAME_INPUT = "#mat-input-1"
 SELECTOR_COOKIE_ACCEPT = "#onetrust-accept-btn-handler"
 SELECTOR_SUBMIT_BUTTON = "button[type='submit']"
-SELECTOR_PRICE_RESULT = "xpath=/html/body/qr-onup-root/div/qr-onup-online-upgrade/main/div[3]/div[2]/div[4]/div/div[1]/qr-onup-fare-card/div/div[1]/div[3]/div[2]/div[2]/span/div/div/span[2]"
+SELECTOR_PRICE_OUTBOUND = "xpath=/html/body/qr-onup-root/div/qr-onup-online-upgrade/main/div/div/div[3]/div/div[1]/qr-aou-fare-card/div/div[1]/div[2]/div/div/span/div/div/span"
+SELECTOR_PRICE_RETURN = "xpath=/html/body/qr-onup-root/div/qr-onup-online-upgrade/main/div/div/div[3]/div/div[2]/qr-aou-fare-card/div/div[1]/div[2]/div/div/span/div/div/span"
 SELECTOR_ERROR_MESSAGE = ".error-message"
 
 LOG_FILE = "price_log.csv"
@@ -46,20 +41,22 @@ def notify(message: str, title: str = "Qatar Upgrade Price"):
         print(f"Notification failed (non-fatal): {e}")
 
 
-def get_last_logged_price() -> str | None:
-    if not os.path.exists(LOG_FILE):
-        return None
-    with open(LOG_FILE) as f:
-        lines = [l.strip() for l in f if l.strip()]
-    if not lines:
-        return None
-    return lines[-1].split(",", 1)[1]
-
-
-def check_price(headless: bool = True) -> str | None:
+def check_price(headless: bool = True) -> tuple[str | None, str | None]:
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            channel="chrome",
+            headless=headless,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 900},
+        )
+        page = context.new_page()
 
         page.goto(URL, wait_until="domcontentloaded", timeout=60000)
         print(f"Page title: {page.title()}")
@@ -72,7 +69,7 @@ def check_price(headless: bool = True) -> str | None:
             with open("debug_page.html", "w") as f:
                 f.write(page.content())
             browser.close()
-            return None
+            return None, None
 
         try:
             page.wait_for_selector(SELECTOR_COOKIE_ACCEPT, timeout=8000, state="visible")
@@ -88,33 +85,42 @@ def check_price(headless: bool = True) -> str | None:
 
         page.click(SELECTOR_SUBMIT_BUTTON)
 
+        outbound_price = None
+        return_price = None
+
         try:
-            page.wait_for_selector(SELECTOR_PRICE_RESULT, timeout=30000, state="visible")
-            price_text = page.inner_text(SELECTOR_PRICE_RESULT)
+            page.wait_for_selector(SELECTOR_PRICE_OUTBOUND, timeout=30000, state="visible")
+            outbound_price = page.inner_text(SELECTOR_PRICE_OUTBOUND)
         except PlaywrightTimeoutError:
+            print("Could not find outbound price.")
+
+        try:
+            page.wait_for_selector(SELECTOR_PRICE_RETURN, timeout=10000, state="visible")
+            return_price = page.inner_text(SELECTOR_PRICE_RETURN)
+        except PlaywrightTimeoutError:
+            print("Could not find return price.")
+
+        if outbound_price is None and return_price is None:
             try:
                 err = page.inner_text(SELECTOR_ERROR_MESSAGE)
-                print(f"No price found, page showed an error instead: {err}")
+                print(f"No prices found, page showed an error instead: {err}")
             except PlaywrightTimeoutError:
-                print("Timed out waiting for a price or error message.")
+                print("Timed out waiting for prices or an error message.")
                 page.screenshot(path="debug_screenshot.png")
                 print("Saved debug_screenshot.png for inspection.")
-            price_text = None
 
         browser.close()
-        return price_text
+        return outbound_price, return_price
 
 
 if __name__ == "__main__":
-    result = check_price(headless=True)
-    if result:
-        print(f"Upgrade price: {result}")
-        last_price = get_last_logged_price()
+    outbound_price, return_price = check_price(headless=True)
+    if outbound_price or return_price:
+        print(f"Outbound price: {outbound_price}")
+        print(f"Return price: {return_price}")
         with open(LOG_FILE, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{result}\n")
-        if result != last_price:
-            notify(f"Price changed to: {result}" if last_price else f"Current upgrade price: {result}")
-        else:
-            print("Price unchanged since last check - no notification sent.")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{outbound_price},{return_price}\n")
+        notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
     else:
+        notify("Price check failed - see debug screenshot/log on the machine.")
         sys.exit(1)

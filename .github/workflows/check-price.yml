@@ -2,10 +2,8 @@ name: Check Qatar Upgrade Price
 
 on:
   schedule:
-    # Runs every 20 minutes. GitHub may delay this by a few minutes
-    # during high load - it's a "best effort" schedule, not exact.
     - cron: '*/20 * * * *'
-  workflow_dispatch: {}  # lets you manually trigger a run from the Actions tab
+  workflow_dispatch: {}
 
 jobs:
   check-price:
@@ -22,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install playwright requests
-          playwright install --with-deps chromium
+          playwright install --with-deps chrome
 
       - name: Run price check
         env:
