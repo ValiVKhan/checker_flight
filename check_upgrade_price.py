@@ -213,6 +213,12 @@ if __name__ == "__main__":
         with open(LOG_FILE, "a") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{outbound_price},{return_price}\n")
 
+        # Always send the routine ntfy heartbeat, every run, regardless of
+        # whether anything changed.
+        notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
+
+        # On top of that, fire an additional loud/repeating Pushover alert
+        # if the price actually changed.
         if (last_outbound is not None and outbound_price != last_outbound) or \
            (last_return is not None and return_price != last_return):
             notify_urgent(
@@ -220,21 +226,23 @@ if __name__ == "__main__":
                 f"Return: {return_price} (was {last_return})",
                 title="Qatar Upgrade Price - CHANGED",
             )
-        else:
-            notify(f"Outbound: {outbound_price}\nReturn: {return_price}")
 
     except CheckFailed as e:
-        # A known, specific failure - urgent, repeating alert with the exact reason.
+        # A known, specific failure - send both: the routine heartbeat so
+        # you can see it in your normal feed, and an urgent repeating alert
+        # so it doesn't get missed.
         print(f"CHECK FAILED: {e}")
+        notify(f"Check failed: {e}", title="Qatar Upgrade Price - ACTION NEEDED")
         notify_urgent(f"Check failed: {e}")
         sys.exit(1)
 
     except Exception as e:
         # Anything unexpected (crash, network blip, Playwright internals,
-        # etc.) - still notify urgently rather than fail silently.
+        # etc.) - same dual notification approach.
         print("UNEXPECTED ERROR:")
         traceback.print_exc()
         short_trace = traceback.format_exc().strip().splitlines()[-1]
+        notify(f"Unexpected error: {short_trace}", title="Qatar Upgrade Price - SCRIPT ERROR")
         notify_urgent(
             f"Unexpected error: {short_trace}",
             title="Qatar Upgrade Price - SCRIPT ERROR",
